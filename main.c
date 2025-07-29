@@ -4,33 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <math.h>                    // Para as funções trigonométricas
+#include <math.h> // Para as funções trigonométricas
 #include "pico/binary_info.h"
 #include "hardware/i2c.h"
 #include "lib/ssd1306.h"
 #include "lib/font.h"
-
-#define LED_VERDE_PIN 11
-#define LED_AZUL_PIN  12
-#define LED_VERMELHO_PIN 13
-
-// Definição dos pinos I2C para o MPU6050
-#define I2C_PORT i2c0                 // I2C0 usa pinos 0 e 1
-#define I2C_SDA 0
-#define I2C_SCL 1
-
-// Definição dos pinos I2C para o display OLED
-#define I2C_PORT_DISP i2c1
-#define I2C_SDA_DISP 14
-#define I2C_SCL_DISP 15
-#define ENDERECO_DISP 0x3C            // Endereço I2C do display
-
-#define ACCEL_SCALE_FACTOR 16384.0f // Para ±2g
-#define GYRO_SCALE_FACTOR  131.0f   // Para ±250°/s
-
-// Endereço padrão do MPU6050
-static int addr = 0x68;
-#include "hardware/adc.h"
+#include "hardware/adc.h" // Incluído para ADC, mas pode ser removido se não for usado no datalogger
 #include "hardware/rtc.h"
 #include "pico/stdlib.h"
 
@@ -42,7 +21,27 @@ static int addr = 0x68;
 #include "rtc.h"
 #include "sd_card.h"
 
-#define ADC_PIN 26 // GPIO 26
+// Definição dos pinos I2C para o MPU6050
+#define I2C_PORT i2c0 // I2C0 usa pinos 0 e 1
+#define I2C_SDA 0
+#define I2C_SCL 1
+
+// Definição dos pinos I2C para o display OLED
+#define I2C_PORT_DISP i2c1
+#define I2C_SDA_DISP 14
+#define I2C_SCL_DISP 15
+#define ENDERECO_DISP 0x3C // Endereço I2C do display
+
+// Endereço padrão do MPU6050
+static int addr = 0x68;
+
+#define ADC_PIN 26 // GPIO 26 - Não será usado no datalogger do MPU6050
+
+// Variáveis globais para o datalogger
+static FIL log_file; // Objeto FIL para o arquivo de log
+static bool file_open = false; // Flag para indicar se o arquivo está aberto
+static char log_filename[30] = "mpu_data.csv"; // Nome do arquivo de log do MPU6050
+
 // Função para resetar e inicializar o MPU6050
 static void mpu6050_reset()
 {
@@ -90,13 +89,7 @@ static void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t *temp)
     *temp = (buffer[0] << 8) | buffer[1];
 }
 
-
-static bool logger_enabled;
-static const uint32_t period = 1000;
-static absolute_time_t next_log_time;
-
-static char filename[20] = "Dalalogger_data1.csv";
-
+// Funções do FatFS (mantidas as originais, mas adaptadas algumas)
 static sd_card_t *sd_get_by_name(const char *const name)
 {
     for (size_t i = 0; i < sd_get_num(); ++i)
@@ -113,7 +106,6 @@ static FATFS *sd_get_fs_by_name(const char *name)
     DBG_PRINTF("%s: unknown name %s\n", __func__, name);
     return NULL;
 }
-
 
 static void run_setrtc()
 {
@@ -192,6 +184,7 @@ static void run_format()
     if (FR_OK != fr)
         printf("f_mkfs error: %s (%d)\n", FRESULT_str(fr), fr);
 }
+
 static void run_mount()
 {
     const char *arg1 = strtok(NULL, " ");
@@ -214,6 +207,7 @@ static void run_mount()
     pSD->mounted = true;
     printf("Processo de montagem do SD ( %s ) concluído\n", pSD->pcName);
 }
+
 static void run_unmount()
 {
     const char *arg1 = strtok(NULL, " ");
@@ -237,6 +231,7 @@ static void run_unmount()
     pSD->m_Status |= STA_NOINIT; // in case medium is removed
     printf("SD ( %s ) desmontado\n", pSD->pcName);
 }
+
 static void run_getfree()
 {
     const char *arg1 = strtok(NULL, " ");
@@ -254,11 +249,14 @@ static void run_getfree()
     {
         printf("f_getfree error: %s (%d)\n", FRESULT_str(fr), fr);
         return;
+        //return -1; // Adicionado para indicar erro
     }
     tot_sect = (p_fs->n_fatent - 2) * p_fs->csize;
     fre_sect = fre_clust * p_fs->csize;
     printf("%10lu KiB total drive space.\n%10lu KiB available.\n", tot_sect / 2, fre_sect / 2);
+    //return 0; // Adicionado para indicar sucesso
 }
+
 static void run_ls()
 {
     const char *arg1 = strtok(NULL, " ");
@@ -310,6 +308,7 @@ static void run_ls()
     }
     f_closedir(&dj);
 }
+
 static void run_cat()
 {
     char *arg1 = strtok(NULL, " ");
@@ -335,133 +334,126 @@ static void run_cat()
         printf("f_open error: %s (%d)\n", FRESULT_str(fr), fr);
 }
 
-// Função para capturar dados e salvar no arquivo *.csv
-void capture_data_and_save()
+// NOVO: Função para inicializar o arquivo de log do MPU6050
+bool init_mpu_logger()
 {
-    printf("\nCapturando dados do . Aguarde finalização...\n");
-    FIL file;
-    FRESULT res = f_open(&file, filename, FA_WRITE | FA_CREATE_ALWAYS);
-    if (res != FR_OK)
-    {
-        printf("\n[ERRO] Não foi possível abrir o arquivo para escrita. Monte o Cartao.\n");
-        return;
-        for (int i = 0; i < 5; i++)
-        {
-            // LIGA o LED Roxo (combinando Vermelho e Azul)
-            gpio_put(LED_VERMELHO_PIN, 1);
-            gpio_put(LED_AZUL_PIN, 1);
-            gpio_put(LED_VERDE_PIN, 0); // Garante que o verde está desligado
+    if (file_open) {
+        printf("[INFO] Arquivo de log do MPU já está aberto.\n");
+        return true;
+    }
 
-            sleep_ms(200); // Permanece aceso por 200ms
-
-            // DESLIGA o LED Roxo (desligando Vermelho e Azul)
-            gpio_put(LED_VERMELHO_PIN, 0);
-            gpio_put(LED_AZUL_PIN, 0);
-
-            sleep_ms(200); // Permanece apagado por 200ms
+    // Tenta montar o cartão SD se ainda não estiver montado
+    sd_card_t *pSD = sd_get_by_name("0:"); // Assumindo "0:" como o nome do drive padrão
+    if (!pSD || !pSD->mounted) {
+        printf("[INFO] Cartão SD não montado. Tentando montar...\n");
+        run_mount(); // Tenta montar o SD
+        sleep_ms(1000); // Dá um tempo para a montagem
+        if (!pSD || !pSD->mounted) {
+            printf("[ERRO] Falha ao montar o cartão SD. Não é possível iniciar o log.\n");
+            return false;
         }
     }
-    //char header_buffer[] = "Amostra,ADC_Value\n"; // Define o cabeçalho
-    char header_buffer[] = "amostra,AccX,AccY,AccZ,GyroX,GyroY,GyroZ\n"; // Define o cabeçalho para dados do MPU6050
-    UINT bw_header;
-    res = f_write(&file, header_buffer, strlen(header_buffer), &bw_header);
+
+    FRESULT res = f_open(&log_file, log_filename, FA_WRITE | FA_OPEN_ALWAYS | FA_READ); // Abrir para escrita, criar se não existir, e permitir leitura para verificar tamanho
     if (res != FR_OK)
     {
-        printf("[ERRO] Não foi possível escrever o cabeçalho no arquivo. Monte o Cartao.\n");
-        
-        f_close(&file);
-        return;
+        printf("[ERRO] Não foi possível abrir/criar o arquivo '%s' para escrita: %s (%d)\n", log_filename, FRESULT_str(res), res);
+        return false;
     }
-    // --- FIM DA ADIÇÃO DO CABEÇALHO ---
-    // Variáveis para armazenar as leituras do MPU6050
-    int16_t aceleracao[3], gyro[3], temp_mpu; // 'temp_mpu' para não confundir com outras variáveis 'temp'
-    float normalized_accel[3];
-    float normalized_gyro[3];
 
-    for (int i = 0; i < 128; i++)
+    // Verificar se o arquivo está vazio para escrever o cabeçalho
+    if (f_size(&log_file) == 0)
     {
-        // === LEITURA DOS DATOS DO MPU6050 ===
-        mpu6050_read_raw(aceleracao, gyro, &temp_mpu); // Captura os dados brutos do MPU6050
-
-        // === NORMALIZAÇÃO DOS DADOS ===
-        normalized_accel[0] = (float)aceleracao[0] / ACCEL_SCALE_FACTOR;
-        normalized_accel[1] = (float)aceleracao[1] / ACCEL_SCALE_FACTOR;
-        normalized_accel[2] = (float)aceleracao[2] / ACCEL_SCALE_FACTOR;
-
-        normalized_gyro[0] = (float)gyro[0] / GYRO_SCALE_FACTOR;
-        normalized_gyro[1] = (float)gyro[1] / GYRO_SCALE_FACTOR;
-        normalized_gyro[2] = (float) gyro[2]  / GYRO_SCALE_FACTOR;
-
-        // Buffer para a linha de dados (aumentado para acomodar floats com casas decimais)
-        char data_buffer[150]; // Aumentado para garantir espaço para valores float formatados
-
-        // Formata a string de dados no formato CSV, AGORA COM %f E AS NOVAS VARIÁVEIS FLOAT
-        sprintf(data_buffer, "%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
-                i + 1, // Número da amostra (começa em 1)
-                normalized_accel[0], normalized_accel[1], normalized_accel[2], // Valores float de aceleração
-                normalized_gyro[0], normalized_gyro[1], normalized_gyro[2]);   // Valores float de giroscópio
-
-        // === ESCRITA NO ARQUIVO ===
-        UINT bw;
-        res = f_write(&file, data_buffer, strlen(data_buffer), &bw);
+        char header_buffer[] = "Timestamp,AccX,AccY,AccZ,GyroX,GyroY,GyroZ\n"; // Cabeçalho com timestamp
+        UINT bw_header;
+        res = f_write(&log_file, header_buffer, strlen(header_buffer), &bw_header);
         if (res != FR_OK)
         {
-            printf("[ERRO] Não foi possível escrever dados do MPU no arquivo: %s (%d)\n", FRESULT_str(res), res);
-            f_close(&file);
-            return;
+            printf("[ERRO] Não foi possível escrever o cabeçalho no arquivo: %s (%d)\n", FRESULT_str(res), res);
+            f_close(&log_file); // Fecha o arquivo em caso de erro
+            return false;
         }
-        f_sync(&file); // Força a escrita do buffer para o cartão SD imediatamente
-
-        sleep_ms(100); // Intervalo entre as amostras (100ms = 10Hz)
     }
-    f_close(&file);
-    printf("\nDados salvos no arquivo %s.\n\n", filename);
-    
+
+    printf("[INFO] Arquivo de log do MPU '%s' aberto com sucesso.\n", log_filename);
+    file_open = true;
+    return true;
 }
 
-// Função para ler o conteúdo de um arquivo e exibir no terminal
-void read_file(const char *filename)
+// NOVO: Função para capturar e salvar dados do MPU6050
+void log_mpu6050_data(int16_t accel[3], int16_t gyro[3])
 {
-    FIL file;
-    FRESULT res = f_open(&file, filename, FA_READ);
-    if (res != FR_OK)
-    {
-        printf("[ERRO] Não foi possível abrir o arquivo para leitura. Verifique se o Cartão está montado ou se o arquivo existe.\n");
-
+    if (!file_open) {
+        printf("[ALERTA] Arquivo de log do MPU não está aberto. Ignorando dados.\n");
         return;
     }
-    char buffer[128];
-    UINT br;
-    printf("Conteúdo do arquivo %s:\n", filename);
-    while (f_read(&file, buffer, sizeof(buffer) - 1, &br) == FR_OK && br > 0)
+
+    datetime_t t;
+    rtc_get_datetime(&t); // Obtém a hora atual do RTC
+
+    char data_buffer[100]; // Buffer para a linha de dados
+
+    // Formata a string de dados
+    sprintf(data_buffer, "%04d-%02d-%02d %02d:%02d:%02d,%d,%d,%d,%d,%d,%d\n",
+            t.year, t.month, t.day, t.hour, t.min, t.sec,
+            accel[0], accel[1], accel[2],
+            gyro[0], gyro[1], gyro[2]);
+
+    UINT bw;
+    FRESULT res = f_write(&log_file, data_buffer, strlen(data_buffer), &bw);
+    if (res != FR_OK)
     {
-        buffer[br] = '\0';
-        printf("%s", buffer);
+        printf("[ERRO] Falha ao escrever dados do MPU no arquivo: %s (%d)\n", FRESULT_str(res), res);
+        // Opcional: tentar fechar e reabrir o arquivo em caso de erro crítico
+        f_close(&log_file);
+        file_open = false;
+        printf("[ERRO] Arquivo de log do MPU fechado devido a erro de escrita.\n");
+    } else {
+        f_sync(&log_file); // Força a escrita dos dados para o SD card imediatamente
     }
-    f_close(&file);
-    printf("\nLeitura do arquivo %s concluída.\n\n", filename);
 }
+
+// NOVO: Função para fechar o arquivo de log do MPU6050
+void close_mpu_logger() {
+    if (file_open) {
+        FRESULT res = f_close(&log_file);
+        if (res == FR_OK) {
+            printf("[INFO] Arquivo de log do MPU fechado com sucesso.\n");
+        } else {
+            printf("[ERRO] Falha ao fechar o arquivo de log do MPU: %s (%d)\n", FRESULT_str(res), res);
+        }
+        file_open = false;
+    } else {
+        printf("[INFO] Arquivo de log do MPU já está fechado.\n");
+    }
+}
+
 
 // Trecho para modo BOOTSEL com botão B
 #include "pico/bootrom.h"
 #define botaoB 6
 void gpio_irq_handler(uint gpio, uint32_t events)
 {
+    // Antes de resetar, tente fechar o arquivo de log para evitar corrupção
+    close_mpu_logger();
+    printf("Entrando em modo BOOTSEL...\n");
+    sleep_ms(100); // Pequeno atraso para garantir a mensagem
     reset_usb_boot(0, 0);
 }
 
 static void run_help()
 {
     printf("\nComandos disponíveis:\n\n");
-    printf("Digite 'a' para montar o cartão SD\n");
-    printf("Digite 'b' para desmontar o cartão SD\n");
-    printf("Digite 'c' para listar arquivos\n");
-    printf("Digite 'd' para mostrar conteúdo do arquivo\n");
+    printf("Digite 'm' para montar o cartão SD\n");
+    printf("Digite 'u' para desmontar o cartão SD\n");
+    printf("Digite 'l' para listar arquivos\n");
+    printf("Digite 't' para mostrar conteúdo do arquivo de log do MPU (%s)\n", log_filename); // Adaptado
     printf("Digite 'e' para obter espaço livre no cartão SD\n");
-    printf("Digite 'f' para capturar dados e salvar no arquivo\n");
-    printf("Digite 'g' para formatar o cartão SD\n");
+    printf("Digite 'f' para formatar o cartão SD\n");
+    printf("Digite 's' para iniciar o log do MPU (cria/abre o arquivo)\n"); // Novo comando
+    printf("Digite 'x' para parar e fechar o log do MPU\n"); // Novo comando
     printf("Digite 'h' para exibir os comandos disponíveis\n");
-    printf("\nEscolha o comando:  ");
+    printf("\nEscolha o comando: ");
 }
 
 typedef void (*p_fn_t)();
@@ -472,6 +464,8 @@ typedef struct
     char const *const help;
 } cmd_def_t;
 
+// NOTA: Os comandos abaixo são para o console serial, não para o loop contínuo de log.
+// Para um datalogger contínuo, a lógica de log estará no main loop.
 static cmd_def_t cmds[] = {
     {"setrtc", run_setrtc, "setrtc <DD> <MM> <YY> <hh> <mm> <ss>: Set Real Time Clock"},
     {"format", run_format, "format [<drive#:>]: Formata o cartão SD"},
@@ -546,17 +540,6 @@ static void process_stdio(int cRxedChar)
 
 int main()
 {
-    // --- Configuração Inicial dos LEDs ---
-    gpio_init(LED_VERDE_PIN);
-    gpio_set_dir(LED_VERDE_PIN, GPIO_OUT); // Define o pino 11 como saída
-   
-    gpio_init(LED_AZUL_PIN);
-    gpio_set_dir(LED_AZUL_PIN, GPIO_OUT); // Define o pino 12 como saída
-    
-    gpio_init(LED_VERMELHO_PIN);
-    gpio_set_dir(LED_VERMELHO_PIN, GPIO_OUT); // Define o pino 13 como saída
-     // --- Fim da Configuração Inicial dos LEDs ---
-
     // Para ser utilizado o modo BOOTSEL com botão B
     gpio_init(botaoB);
     gpio_set_dir(botaoB, GPIO_IN);
@@ -564,9 +547,16 @@ int main()
     gpio_set_irq_enabled_with_callback(botaoB, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
     stdio_init_all();
-    sleep_ms(5000);
-    time_init();
-    adc_init();
+    sleep_ms(2000); // Reduzido o delay inicial
+    printf("Iniciando Datalogger MPU6050...\n");
+
+    time_init(); // Inicializa o RTC
+    rtc_init(); // Habilita o hardware do RTC
+
+    // Opcional: Defina a data e hora do RTC aqui se não quiser usar o comando 'setrtc'
+    // datetime_t initial_time = { .year = 2025, .month = 7, .day = 29, .dotw = 2, .hour = 10, .min = 0, .sec = 0};
+    // rtc_set_datetime(&initial_time);
+    // printf("RTC configurado para 29/07/2025 10:00:00\n");
 
     // Inicializa a I2C do Display OLED em 400kHz
     i2c_init(I2C_PORT_DISP, 400 * 1000);
@@ -575,7 +565,7 @@ int main()
     gpio_pull_up(I2C_SDA_DISP);
     gpio_pull_up(I2C_SCL_DISP);
 
-     ssd1306_t ssd;
+    ssd1306_t ssd;
     ssd1306_init(&ssd, WIDTH, HEIGHT, false, ENDERECO_DISP, I2C_PORT_DISP);
     ssd1306_config(&ssd);
     ssd1306_send_data(&ssd);
@@ -596,136 +586,123 @@ int main()
     mpu6050_reset();
 
     int16_t aceleracao[3], gyro[3], temp;
+    bool cor = true;
+    uint32_t log_interval_ms = 100; // Intervalo de log em milissegundos (100ms = 10Hz)
+    absolute_time_t last_log_time = get_absolute_time(); // Para controle de tempo
 
-    bool cor = true;    
-    ssd1306_fill(&ssd, !cor);                            // Limpa o display
-    ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);        // Desenha um retângulo
-    ssd1306_draw_string(&ssd, "Inicializando", 17, 28); // Escreve texto no display
-    // LIGA o LED Amarelo (combinando Vermelho e Verde)
-    gpio_put(LED_VERMELHO_PIN, 1); // Liga o LED Vermelho
-    gpio_put(LED_VERDE_PIN, 1);    // Liga o LED Verde
-    gpio_put(LED_AZUL_PIN, 0);     // Garante que o LED Azul está desligado
-    ssd1306_send_data(&ssd);
-    sleep_ms(2100);
-
-    printf("FatFS SPI example\n");
-    printf("\033[2J\033[H"); // Limpa tela
     printf("\n> ");
     stdio_flush();
-    //    printf("A tela foi limpa...\n");
-    //    printf("Depois do Flush\n");
-    run_help();
-    gpio_put(LED_VERMELHO_PIN, 0); 
-    gpio_put(LED_VERDE_PIN, 0);    
-    gpio_put(LED_AZUL_PIN, 0);     
-   
+    run_help(); // Exibe os comandos disponíveis no início
+
     while (true)
-    {   
+    {
+        // === Lógica para o Datalogger contínuo do MPU6050 ===
+        if (file_open && absolute_time_diff_us(last_log_time, get_absolute_time()) / 1000 >= log_interval_ms)
+        {
+            mpu6050_read_raw(aceleracao, gyro, &temp); // Lê os dados do MPU
+            log_mpu6050_data(aceleracao, gyro);        // Salva os dados no arquivo
+            last_log_time = get_absolute_time();       // Atualiza o último tempo de log
+        }
+        // === Fim da Lógica do Datalogger ===
+
+
+        // Leitura dos dados de aceleração, giroscópio e temperatura (para o display)
+        mpu6050_read_raw(aceleracao, gyro, &temp);
+
+        // Conversão para unidade de 'g'
+        float ax = aceleracao[0] / 16384.0f;
+        float ay = aceleracao[1] / 16384.0f;
+        float az = aceleracao[2] / 16384.0f;
+
+        // Cálculo dos ângulos em graus (Roll e Pitch)
+        float roll = atan2(ay, az) * 180.0f / M_PI;
+        float pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / M_PI;
+
+        // Montagem das strings para o display
+        char str_roll[20];
+        char str_pitch[20];
+
+        snprintf(str_roll, sizeof(str_roll), "%5.1f", roll);
+        snprintf(str_pitch, sizeof(str_pitch), "%5.1f", pitch);
+
         // Exibição no display
-        ssd1306_fill(&ssd, !cor);                            // Limpa o display
-        ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);        // Desenha um retângulo
-        ssd1306_draw_string(&ssd, "Aguardando", 17, 28); // Escreve texto no display
+        ssd1306_fill(&ssd, !cor);                        // Limpa o display
+        ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
+        ssd1306_line(&ssd, 3, 25, 123, 25, cor);         // Desenha uma linha horizontal
+        ssd1306_line(&ssd, 3, 37, 123, 37, cor);         // Desenha outra linha horizontal
+        ssd1306_draw_string(&ssd, "CEPEDI   TIC37", 8, 6); // Escreve texto no display
+        ssd1306_draw_string(&ssd, "EMBARCATECH", 20, 16);    // Escreve texto no display
+        ssd1306_draw_string(&ssd, "IMU    MPU6050", 10, 28); // Escreve texto no display
+        ssd1306_line(&ssd, 63, 35, 63, 60, cor);         // Desenha uma linha vertical
+        ssd1306_draw_string(&ssd, "roll", 14, 41);          // Escreve texto no display
+        ssd1306_draw_string(&ssd, str_roll, 14, 52);       // Exibe Roll
+        ssd1306_draw_string(&ssd, "pitch", 73, 41);         // Escreve texto no display
+        ssd1306_draw_string(&ssd, str_pitch, 73, 52);      // Exibe Pitch
         ssd1306_send_data(&ssd);
-        sleep_ms(500);
+        sleep_ms(50); // Reduzido o delay para que o display atualize mais rápido e o terminal não fique tão "preso"
+
         int cRxedChar = getchar_timeout_us(0);
         if (PICO_ERROR_TIMEOUT != cRxedChar)
             process_stdio(cRxedChar);
 
-        if (cRxedChar == 'a') // Monta o SD card se pressionar 'a'
+        // === Novos Comandos para o Datalogger no Terminal ===
+        if (cRxedChar == 'm') // Monta o SD card se pressionar 'm'
         {
-            gpio_put(LED_VERMELHO_PIN, 1); // Liga o LED Vermelho
-            gpio_put(LED_VERDE_PIN, 1);    // Liga o LED Verde
-            gpio_put(LED_AZUL_PIN, 0);     // Garante que o LED Azul está desligado
-            ssd1306_fill(&ssd, !cor);                        // Limpa o display
-            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
-            ssd1306_draw_string(&ssd, "Montando SD ", 15, 28); // Escreve texto no display
-            ssd1306_send_data(&ssd);
-            sleep_ms(2100);
             printf("\nMontando o SD...\n");
             run_mount();
-            printf("\nEscolha o comando (h = help):  ");
-            gpio_put(LED_VERMELHO_PIN, 0); // sistema pronto para iniciar captura 
+            printf("\nEscolha o comando (h = help): ");
         }
-        if (cRxedChar == 'b') // Desmonta o SD card se pressionar 'b'
+        if (cRxedChar == 'u') // Desmonta o SD card se pressionar 'u'
         {
-            ssd1306_fill(&ssd, !cor);                        // Limpa o display
-            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
-            ssd1306_draw_string(&ssd, "Desmonstando SD ", 5, 28); // Escreve texto no display
-            ssd1306_send_data(&ssd);
-            sleep_ms(2100);
             printf("\nDesmontando o SD. Aguarde...\n");
+            close_mpu_logger(); // Tenta fechar o arquivo de log antes de desmontar
             run_unmount();
-            printf("\nEscolha o comando (h = help):  ");
+            printf("\nEscolha o comando (h = help): ");
         }
-        if (cRxedChar == 'c') // Lista diretórios e os arquivos se pressionar 'c'
+        if (cRxedChar == 'l') // Lista diretórios e os arquivos se pressionar 'l'
         {
             printf("\nListagem de arquivos no cartão SD.\n");
             run_ls();
             printf("\nListagem concluída.\n");
-            printf("\nEscolha o comando (h = help):  ");
+            printf("\nEscolha o comando (h = help): ");
         }
-        if (cRxedChar == 'd') // Exibe o conteúdo do arquivo se pressionar 'd'
+        if (cRxedChar == 't') // Exibe o conteúdo do arquivo de log do MPU
         {
-            for (int i = 0; i < 5; i++)
-            {
-                // LIGA o LED azul 
-                gpio_put(LED_VERMELHO_PIN, 0);
-                gpio_put(LED_AZUL_PIN, 1);
-                gpio_put(LED_VERDE_PIN, 0); 
-
-                sleep_ms(200); // Permanece aceso por 200ms
-
-                // DESLIGA o LED  (desligando Vermelho e Azul)
-                gpio_put(LED_AZUL_PIN, 0);
-
-                sleep_ms(200); // Permanece apagado por 200ms
-            }
-            gpio_put(LED_VERDE_PIN, 1); 
-            read_file(filename);
-            printf("Escolha o comando (h = help):  ");
+            read_file(log_filename); // Usa o nome de arquivo do MPU
+            printf("Escolha o comando (h = help): ");
         }
         if (cRxedChar == 'e') // Obtém o espaço livre no SD card se pressionar 'e'
         {
             printf("\nObtendo espaço livre no SD.\n\n");
             run_getfree();
             printf("\nEspaço livre obtido.\n");
-            printf("\nEscolha o comando (h = help):  ");
+            printf("\nEscolha o comando (h = help): ");
         }
-        if (cRxedChar == 'f') // Captura dados e salva no arquivo se pressionar 'f'
-        {
-            gpio_put(LED_VERMELHO_PIN, 1); // Liga o LED Vermelho
-            gpio_put(LED_VERDE_PIN, 0);    
-            gpio_put(LED_AZUL_PIN, 0);     
-            ssd1306_fill(&ssd, !cor);                        // Limpa o display
-            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
-            ssd1306_draw_string(&ssd, "Capt.Dados ", 17, 28); // Escreve texto no display
-            ssd1306_send_data(&ssd);
-            sleep_ms(500);
-            capture_data_and_save();
-            printf("\nEscolha o comando (h = help):  ");
-            ssd1306_fill(&ssd, !cor);                        // Limpa o display
-            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
-            ssd1306_draw_string(&ssd, "120 amostras ", 5, 28); // Escreve texto no display
-            ssd1306_draw_string(&ssd, "Dados Salvos ", 26, 28); // Escreve texto no display
-            ssd1306_send_data(&ssd);
-            sleep_ms(2100);
-            gpio_put(LED_VERMELHO_PIN, 0); 
-            gpio_put(LED_VERDE_PIN, 1);    // Liga o LED Verde (pronto para caapturar)
-            gpio_put(LED_AZUL_PIN, 0);     
-           
-        }
-        if (cRxedChar == 'g') // Formata o SD card se pressionar 'g'
+        if (cRxedChar == 'f') // Formata o SD card se pressionar 'f'
         {
             printf("\nProcesso de formatação do SD iniciado. Aguarde...\n");
+            close_mpu_logger(); // Tenta fechar o arquivo de log antes de formatar
             run_format();
             printf("\nFormatação concluída.\n\n");
-            printf("\nEscolha o comando (h = help):  ");
+            printf("\nEscolha o comando (h = help): ");
+        }
+        if (cRxedChar == 's') // Inicia o log do MPU
+        {
+            printf("\nIniciando o log de dados do MPU...\n");
+            init_mpu_logger();
+            printf("\nEscolha o comando (h = help): ");
+        }
+        if (cRxedChar == 'x') // Para o log do MPU
+        {
+            printf("\nParando e fechando o log de dados do MPU...\n");
+            close_mpu_logger();
+            printf("\nEscolha o comando (h = help): ");
         }
         if (cRxedChar == 'h') // Exibe os comandos disponíveis se pressionar 'h'
         {
             run_help();
         }
-        sleep_ms(500);
     }
+    close_mpu_logger(); // Garante que o arquivo é fechado ao sair do main (embora o while(true) seja infinito)
     return 0;
 }
