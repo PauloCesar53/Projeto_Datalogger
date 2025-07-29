@@ -567,7 +567,11 @@ int main()
     int16_t aceleracao[3], gyro[3], temp;
 
     bool cor = true;    
-
+    ssd1306_fill(&ssd, !cor);                            // Limpa o display
+    ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);        // Desenha um retângulo
+    ssd1306_draw_string(&ssd, "Inicializando", 17, 28); // Escreve texto no display
+    ssd1306_send_data(&ssd);
+    sleep_ms(2100);
 
     printf("FatFS SPI example\n");
     printf("\033[2J\033[H"); // Limpa tela
@@ -595,16 +599,7 @@ int main()
         // Exibição no display
         ssd1306_fill(&ssd, !cor);                            // Limpa o display
         ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);        // Desenha um retângulo
-        ssd1306_line(&ssd, 3, 25, 123, 25, cor);             // Desenha uma linha horizontal
-        ssd1306_line(&ssd, 3, 37, 123, 37, cor);             // Desenha outra linha horizontal
-        ssd1306_draw_string(&ssd, "CEPEDI   TIC37", 8, 6);   // Escreve texto no display
-        ssd1306_draw_string(&ssd, "EMBARCATECH", 20, 16);    // Escreve texto no display
-        ssd1306_draw_string(&ssd, "IMU    MPU6050", 10, 28); // Escreve texto no display
-        ssd1306_line(&ssd, 63, 35, 63, 60, cor);             // Desenha uma linha vertical
-        ssd1306_draw_string(&ssd, "roll", 14, 41);           // Escreve texto no display
-        ssd1306_draw_string(&ssd, str_roll, 14, 52);         // Exibe Roll
-        ssd1306_draw_string(&ssd, "pitch", 73, 41);           // Escreve texto no display        
-        ssd1306_draw_string(&ssd, str_pitch, 73, 52);        // Exibe Pitch
+        ssd1306_draw_string(&ssd, "Aguardando", 17, 28); // Escreve texto no display
         ssd1306_send_data(&ssd);
         sleep_ms(500);
         int cRxedChar = getchar_timeout_us(0);
@@ -613,12 +608,22 @@ int main()
 
         if (cRxedChar == 'a') // Monta o SD card se pressionar 'a'
         {
+            ssd1306_fill(&ssd, !cor);                        // Limpa o display
+            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
+            ssd1306_draw_string(&ssd, "Montando SD ", 15, 28); // Escreve texto no display
+            ssd1306_send_data(&ssd);
+            sleep_ms(2100);
             printf("\nMontando o SD...\n");
             run_mount();
             printf("\nEscolha o comando (h = help):  ");
         }
         if (cRxedChar == 'b') // Desmonta o SD card se pressionar 'b'
         {
+            ssd1306_fill(&ssd, !cor);                        // Limpa o display
+            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
+            ssd1306_draw_string(&ssd, "Desmonstando SD ", 5, 28); // Escreve texto no display
+            ssd1306_send_data(&ssd);
+            sleep_ms(2100);
             printf("\nDesmontando o SD. Aguarde...\n");
             run_unmount();
             printf("\nEscolha o comando (h = help):  ");
@@ -644,8 +649,19 @@ int main()
         }
         if (cRxedChar == 'f') // Captura dados e salva no arquivo se pressionar 'f'
         {
+            ssd1306_fill(&ssd, !cor);                        // Limpa o display
+            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
+            ssd1306_draw_string(&ssd, "Capt.Dados ", 17, 28); // Escreve texto no display
+            ssd1306_send_data(&ssd);
+            sleep_ms(500);
             capture_data_and_save();
             printf("\nEscolha o comando (h = help):  ");
+            ssd1306_fill(&ssd, !cor);                        // Limpa o display
+            ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);    // Desenha um retângulo
+            ssd1306_draw_string(&ssd, "120 amostras ", 5, 28); // Escreve texto no display
+            ssd1306_draw_string(&ssd, "Dados Salvos ", 26, 28); // Escreve texto no display
+            ssd1306_send_data(&ssd);
+            sleep_ms(2100);
         }
         if (cRxedChar == 'g') // Formata o SD card se pressionar 'g'
         {
