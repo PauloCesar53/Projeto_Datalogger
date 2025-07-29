@@ -4,7 +4,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>                    // Para as funções trigonométricas
+#include "pico/binary_info.h"
+#include "hardware/i2c.h"
+#include "lib/ssd1306.h"
+#include "lib/font.h"
 
+// Definição dos pinos I2C para o MPU6050
+#define I2C_PORT i2c0                 // I2C0 usa pinos 0 e 1
+#define I2C_SDA 0
+#define I2C_SCL 1
+
+// Definição dos pinos I2C para o display OLED
+#define I2C_PORT_DISP i2c1
+#define I2C_SDA_DISP 14
+#define I2C_SCL_DISP 15
+#define ENDERECO_DISP 0x3C            // Endereço I2C do display
+
+#define ACCEL_SCALE_FACTOR 16384.0f // Para ±2g
+#define GYRO_SCALE_FACTOR  131.0f   // Para ±250°/s
+
+// Endereço padrão do MPU6050
+static int addr = 0x68;
 #include "hardware/adc.h"
 #include "hardware/rtc.h"
 #include "pico/stdlib.h"
@@ -18,6 +39,53 @@
 #include "sd_card.h"
 
 #define ADC_PIN 26 // GPIO 26
+// Função para resetar e inicializar o MPU6050
+static void mpu6050_reset()
+{
+    // Dois bytes para reset: primeiro o registrador, segundo o dado
+    uint8_t buf[] = {0x6B, 0x80};
+    i2c_write_blocking(I2C_PORT, addr, buf, 2, false);
+    sleep_ms(100); // Aguarda reset e estabilização
+
+    // Sai do modo sleep (registrador 0x6B, valor 0x00)
+    buf[1] = 0x00;
+    i2c_write_blocking(I2C_PORT, addr, buf, 2, false);
+    sleep_ms(10); // Aguarda estabilização após acordar
+}
+
+// Função para ler dados crus do acelerômetro, giroscópio e temperatura
+static void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t *temp)
+{
+    uint8_t buffer[6];
+
+    // Lê aceleração a partir do registrador 0x3B (6 bytes)
+    uint8_t val = 0x3B;
+    i2c_write_blocking(I2C_PORT, addr, &val, 1, true);
+    i2c_read_blocking(I2C_PORT, addr, buffer, 6, false);
+
+    for (int i = 0; i < 3; i++)
+    {
+        accel[i] = (buffer[i * 2] << 8) | buffer[(i * 2) + 1];
+    }
+
+    // Lê giroscópio a partir do registrador 0x43 (6 bytes)
+    val = 0x43;
+    i2c_write_blocking(I2C_PORT, addr, &val, 1, true);
+    i2c_read_blocking(I2C_PORT, addr, buffer, 6, false);
+
+    for (int i = 0; i < 3; i++)
+    {
+        gyro[i] = (buffer[i * 2] << 8) | buffer[(i * 2) + 1];
+    }
+
+    // Lê temperatura a partir do registrador 0x41 (2 bytes)
+    val = 0x41;
+    i2c_write_blocking(I2C_PORT, addr, &val, 1, true);
+    i2c_read_blocking(I2C_PORT, addr, buffer, 2, false);
+
+    *temp = (buffer[0] << 8) | buffer[1];
+}
+
 
 static bool logger_enabled;
 static const uint32_t period = 1000;
@@ -41,6 +109,7 @@ static FATFS *sd_get_fs_by_name(const char *name)
     DBG_PRINTF("%s: unknown name %s\n", __func__, name);
     return NULL;
 }
+
 
 static void run_setrtc()
 {
@@ -262,10 +331,10 @@ static void run_cat()
         printf("f_open error: %s (%d)\n", FRESULT_str(fr), fr);
 }
 
-// Função para capturar dados do ADC e salvar no arquivo *.txt
-void capture_adc_data_and_save()
+// Função para capturar dados e salvar no arquivo *.csv
+void capture_data_and_save()
 {
-    printf("\nCapturando dados do ADC. Aguarde finalização...\n");
+    printf("\nCapturando dados do . Aguarde finalização...\n");
     FIL file;
     FRESULT res = f_open(&file, filename, FA_WRITE | FA_CREATE_ALWAYS);
     if (res != FR_OK)
@@ -273,7 +342,8 @@ void capture_adc_data_and_save()
         printf("\n[ERRO] Não foi possível abrir o arquivo para escrita. Monte o Cartao.\n");
         return;
     }
-    char header_buffer[] = "Amostra,ADC_Value\n"; // Define o cabeçalho
+    //char header_buffer[] = "Amostra,ADC_Value\n"; // Define o cabeçalho
+    char header_buffer[] = "amostra,AccX,AccY,AccZ,GyroX,GyroY,GyroZ\n"; // Define o cabeçalho para dados do MPU6050
     UINT bw_header;
     res = f_write(&file, header_buffer, strlen(header_buffer), &bw_header);
     if (res != FR_OK)
@@ -283,25 +353,50 @@ void capture_adc_data_and_save()
         return;
     }
     // --- FIM DA ADIÇÃO DO CABEÇALHO ---
+    // Variáveis para armazenar as leituras do MPU6050
+    int16_t aceleracao[3], gyro[3], temp_mpu; // 'temp_mpu' para não confundir com outras variáveis 'temp'
+    float normalized_accel[3];
+    float normalized_gyro[3];
+
     for (int i = 0; i < 128; i++)
     {
-        adc_select_input(0);
-        uint16_t adc_value = adc_read();
-        char buffer[50];
-        //sprintf(buffer, "%d %d\n", i + 1, adc_value);
-        sprintf(buffer, "%d,%d\n", i + 1, adc_value);
+        // === LEITURA DOS DATOS DO MPU6050 ===
+        mpu6050_read_raw(aceleracao, gyro, &temp_mpu); // Captura os dados brutos do MPU6050
+
+        // === NORMALIZAÇÃO DOS DADOS ===
+        normalized_accel[0] = (float)aceleracao[0] / ACCEL_SCALE_FACTOR;
+        normalized_accel[1] = (float)aceleracao[1] / ACCEL_SCALE_FACTOR;
+        normalized_accel[2] = (float)aceleracao[2] / ACCEL_SCALE_FACTOR;
+
+        normalized_gyro[0] = (float)gyro[0] / GYRO_SCALE_FACTOR;
+        normalized_gyro[1] = (float)gyro[1] / GYRO_SCALE_FACTOR;
+        normalized_gyro[2] = (float) gyro[2]  / GYRO_SCALE_FACTOR;
+
+        // Buffer para a linha de dados (aumentado para acomodar floats com casas decimais)
+        char data_buffer[150]; // Aumentado para garantir espaço para valores float formatados
+
+        // Formata a string de dados no formato CSV, AGORA COM %f E AS NOVAS VARIÁVEIS FLOAT
+        sprintf(data_buffer, "%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                i + 1, // Número da amostra (começa em 1)
+                normalized_accel[0], normalized_accel[1], normalized_accel[2], // Valores float de aceleração
+                normalized_gyro[0], normalized_gyro[1], normalized_gyro[2]);   // Valores float de giroscópio
+
+        // === ESCRITA NO ARQUIVO ===
         UINT bw;
-        res = f_write(&file, buffer, strlen(buffer), &bw);
+        res = f_write(&file, data_buffer, strlen(data_buffer), &bw);
         if (res != FR_OK)
         {
-            printf("[ERRO] Não foi possível escrever no arquivo. Monte o Cartao.\n");
+            printf("[ERRO] Não foi possível escrever dados do MPU no arquivo: %s (%d)\n", FRESULT_str(res), res);
             f_close(&file);
             return;
         }
-        sleep_ms(100);
+        f_sync(&file); // Força a escrita do buffer para o cartão SD imediatamente
+
+        sleep_ms(100); // Intervalo entre as amostras (100ms = 10Hz)
     }
     f_close(&file);
-    printf("\nDados do ADC salvos no arquivo %s.\n\n", filename);
+    printf("\nDados salvos no arquivo %s.\n\n", filename);
+    
 }
 
 // Função para ler o conteúdo de um arquivo e exibir no terminal
@@ -343,7 +438,7 @@ static void run_help()
     printf("Digite 'c' para listar arquivos\n");
     printf("Digite 'd' para mostrar conteúdo do arquivo\n");
     printf("Digite 'e' para obter espaço livre no cartão SD\n");
-    printf("Digite 'f' para capturar dados do ADC e salvar no arquivo\n");
+    printf("Digite 'f' para capturar dados e salvar no arquivo\n");
     printf("Digite 'g' para formatar o cartão SD\n");
     printf("Digite 'h' para exibir os comandos disponíveis\n");
     printf("\nEscolha o comando:  ");
@@ -442,6 +537,38 @@ int main()
     time_init();
     adc_init();
 
+    // Inicializa a I2C do Display OLED em 400kHz
+    i2c_init(I2C_PORT_DISP, 400 * 1000);
+    gpio_set_function(I2C_SDA_DISP, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL_DISP, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA_DISP);
+    gpio_pull_up(I2C_SCL_DISP);
+
+     ssd1306_t ssd;
+    ssd1306_init(&ssd, WIDTH, HEIGHT, false, ENDERECO_DISP, I2C_PORT_DISP);
+    ssd1306_config(&ssd);
+    ssd1306_send_data(&ssd);
+
+    // Limpa o display
+    ssd1306_fill(&ssd, false);
+    ssd1306_send_data(&ssd);
+
+    // Inicialização da I2C do MPU6050
+    i2c_init(I2C_PORT, 400 * 1000);
+    gpio_set_function(I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(I2C_SDA);
+    gpio_pull_up(I2C_SCL);
+
+    // Declara os pinos como I2C na Binary Info
+    bi_decl(bi_2pins_with_func(I2C_SDA, I2C_SCL, GPIO_FUNC_I2C));
+    mpu6050_reset();
+
+    int16_t aceleracao[3], gyro[3], temp;
+
+    bool cor = true;    
+
+
     printf("FatFS SPI example\n");
     printf("\033[2J\033[H"); // Limpa tela
     printf("\n> ");
@@ -451,6 +578,35 @@ int main()
     run_help();
     while (true)
     {
+        
+        // Cálculo dos ângulos em graus (Roll e Pitch)
+        float roll  =  180;
+        float pitch = 130.0;
+
+        // Montagem das strings para o display
+        char str_roll[20];
+        char str_pitch[20];
+
+        
+        snprintf(str_roll,  sizeof(str_roll),  "%5.1f", roll);
+        snprintf(str_pitch, sizeof(str_pitch), "%5.1f", pitch);
+        
+
+        // Exibição no display
+        ssd1306_fill(&ssd, !cor);                            // Limpa o display
+        ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);        // Desenha um retângulo
+        ssd1306_line(&ssd, 3, 25, 123, 25, cor);             // Desenha uma linha horizontal
+        ssd1306_line(&ssd, 3, 37, 123, 37, cor);             // Desenha outra linha horizontal
+        ssd1306_draw_string(&ssd, "CEPEDI   TIC37", 8, 6);   // Escreve texto no display
+        ssd1306_draw_string(&ssd, "EMBARCATECH", 20, 16);    // Escreve texto no display
+        ssd1306_draw_string(&ssd, "IMU    MPU6050", 10, 28); // Escreve texto no display
+        ssd1306_line(&ssd, 63, 35, 63, 60, cor);             // Desenha uma linha vertical
+        ssd1306_draw_string(&ssd, "roll", 14, 41);           // Escreve texto no display
+        ssd1306_draw_string(&ssd, str_roll, 14, 52);         // Exibe Roll
+        ssd1306_draw_string(&ssd, "pitch", 73, 41);           // Escreve texto no display        
+        ssd1306_draw_string(&ssd, str_pitch, 73, 52);        // Exibe Pitch
+        ssd1306_send_data(&ssd);
+        sleep_ms(500);
         int cRxedChar = getchar_timeout_us(0);
         if (PICO_ERROR_TIMEOUT != cRxedChar)
             process_stdio(cRxedChar);
@@ -486,9 +642,9 @@ int main()
             printf("\nEspaço livre obtido.\n");
             printf("\nEscolha o comando (h = help):  ");
         }
-        if (cRxedChar == 'f') // Captura dados do ADC e salva no arquivo se pressionar 'f'
+        if (cRxedChar == 'f') // Captura dados e salva no arquivo se pressionar 'f'
         {
-            capture_adc_data_and_save();
+            capture_data_and_save();
             printf("\nEscolha o comando (h = help):  ");
         }
         if (cRxedChar == 'g') // Formata o SD card se pressionar 'g'
