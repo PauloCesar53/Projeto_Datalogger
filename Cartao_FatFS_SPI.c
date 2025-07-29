@@ -9,7 +9,8 @@
 #include "hardware/i2c.h"
 #include "lib/ssd1306.h"
 #include "lib/font.h"
-
+#include "hardware/pwm.h"
+#define buzzer 21// pino do Buzzer na BitDogLab
 #define LED_VERDE_PIN 11
 #define LED_AZUL_PIN  12
 #define LED_VERMELHO_PIN 13
@@ -380,6 +381,11 @@ void capture_data_and_save()
 
     for (int i = 0; i < 128; i++)
     {
+        if(i==0){
+            pwm_set_gpio_level(buzzer, 100);//liga buzzer
+            sleep_ms(111);
+            pwm_set_gpio_level(buzzer, 0);//desliga buzzer
+        }
         // === LEITURA DOS DATOS DO MPU6050 ===
         mpu6050_read_raw(aceleracao, gyro, &temp_mpu); // Captura os dados brutos do MPU6050
 
@@ -413,10 +419,19 @@ void capture_data_and_save()
         f_sync(&file); // Força a escrita do buffer para o cartão SD imediatamente
 
         sleep_ms(100); // Intervalo entre as amostras (100ms = 10Hz)
+        if (i == 127)
+        {
+            pwm_set_gpio_level(buzzer, 100); // liga buzzer
+            sleep_ms(111);
+            pwm_set_gpio_level(buzzer, 0); // desliga buzzer
+            sleep_ms(111);
+            pwm_set_gpio_level(buzzer, 100); // liga buzzer
+            sleep_ms(111);
+            pwm_set_gpio_level(buzzer, 0); // desliga buzzer
+        }
     }
     f_close(&file);
     printf("\nDados salvos no arquivo %s.\n\n", filename);
-    
 }
 
 // Função para ler o conteúdo de um arquivo e exibir no terminal
@@ -546,6 +561,14 @@ static void process_stdio(int cRxedChar)
 
 int main()
 {
+    //configurando PWM
+    uint pwm_wrap = 1999;// definindo valor de wrap 
+    gpio_set_function(buzzer, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(buzzer);
+    pwm_set_wrap(slice_num, pwm_wrap);
+    pwm_set_clkdiv(slice_num, 75.0);//divisor de clock 
+    pwm_set_enabled(slice_num, true);// Ativa PWM
+
     // --- Configuração Inicial dos LEDs ---
     gpio_init(LED_VERDE_PIN);
     gpio_set_dir(LED_VERDE_PIN, GPIO_OUT); // Define o pino 11 como saída
